@@ -34,6 +34,11 @@
         </div>
       </div>
 
+      <label class="switch" for="require-server-auth">
+        <input id="require-server-auth" type="checkbox">
+        <span>要求服务器用途（extendedKeyUsage 须含 serverAuth，且链上任一 EKU 均不排除该用途）</span>
+      </label>
+
       <div class="actions">
         <button id="submit" type="button">提交复核</button>
         <button id="clear" type="button" class="secondary">清空草稿</button>

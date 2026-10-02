@@ -7,6 +7,7 @@ const els = {
   certs: $('certs'),
   dns: $('dns'),
   time: $('time'),
+  requireServerAuth: $('require-server-auth'),
   submit: $('submit'),
   clear: $('clear'),
   status: $('status'),
@@ -31,6 +32,7 @@ try {
     els.certs.value = draft.certs || '';
     els.dns.value = draft.dns || '';
     if (draft.time) els.time.value = draft.time;
+    els.requireServerAuth.checked = draft.requireServerAuth === true;
   }
 } catch { /* 忽略损坏的草稿 */ }
 if (!els.time.value) els.time.value = toLocalInput(new Date());
@@ -41,11 +43,13 @@ function saveDraft() {
     certs: els.certs.value,
     dns: els.dns.value,
     time: els.time.value,
+    requireServerAuth: els.requireServerAuth.checked,
   }));
 }
-for (const el of [els.anchor, els.certs, els.dns, els.time]) {
+for (const el of [els.anchor, els.certs, els.dns, els.time, els.requireServerAuth]) {
   el.addEventListener('input', saveDraft);
 }
+els.requireServerAuth.addEventListener('change', saveDraft);
 
 // —— Worker 通讯
 const worker = new Worker('./worker.js', { type: 'module' });
@@ -116,7 +120,7 @@ function render(r) {
     showError(r.stage, r.level, r.label, r.message);
     return;
   }
-  els.status.textContent = `结论：信任链成立（${r.chain.length} 级，按 SHA-256 摘要序稳定选出）`;
+  els.status.textContent = `结论：信任链成立（${r.chain.length} 级，按 SHA-256 摘要序稳定选出${els.requireServerAuth.checked ? '，serverAuth 服务器用途逐级通过' : ''}）`;
   els.status.className = 'ok';
   const ol = document.createElement('ol');
   ol.className = 'chain';
@@ -153,7 +157,10 @@ els.submit.addEventListener('click', async () => {
     if (!dnsName) throw new Error('请填写目标 DNS 名称');
     const t = new Date(els.time.value);
     if (Number.isNaN(t.getTime())) throw new Error('验证时刻非法');
-    payload = { anchorDer, certDers, dnsName, verifyTime: t.getTime() };
+    payload = {
+      anchorDer, certDers, dnsName, verifyTime: t.getTime(),
+      requireServerAuth: els.requireServerAuth.checked,
+    };
   } catch (e) {
     showError('input', null, null, e.message);
     return;
@@ -171,6 +178,7 @@ els.clear.addEventListener('click', () => {
   els.certs.value = '';
   els.dns.value = '';
   els.time.value = toLocalInput(new Date());
+  els.requireServerAuth.checked = false;
   localStorage.removeItem(DRAFT_KEY);
   els.result.replaceChildren();
   els.status.textContent = '待提交';

@@ -64,8 +64,13 @@ function buildWorld({ root = {}, inter = {}, leaf = {} } = {}) {
   return { anchor, inter: interDer, leaf: leafDer, rootK, interK, leafK };
 }
 
-const run = (anchor, certs, dns = 'app.example.com', at = T) =>
-  verifyChainSet({ anchorDer: anchor, certDers: certs, dnsName: dns, verifyTime: at });
+const SERVER_AUTH = '1.3.6.1.5.5.7.3.1';
+const CLIENT_AUTH = '1.3.6.1.5.5.7.3.2';
+
+const run = (anchor, certs, dns = 'app.example.com', at = T, requireServerAuth = false) =>
+  verifyChainSet({
+    anchorDer: anchor, certDers: certs, dnsName: dns, verifyTime: at, requireServerAuth,
+  });
 
 // ---------- 单元：DER ECDSA 签名转换 ----------
 {
@@ -359,6 +364,103 @@ const run = (anchor, certs, dns = 'app.example.com', at = T) =>
   const atNotAfter = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', NA.getTime());
   ok('场景21：验证时刻取 notAfter 端点 → 成立', assertOk(atNotAfter, '边界') === true,
     atNotAfter.ok ? '' : atNotAfter.message);
+}
+
+// ---------- 场景 22：开启用途复核，有效 serverAuth 链 ----------
+{
+  const w = buildWorld({
+    inter: { eku: [SERVER_AUTH] },
+    leaf: { eku: [SERVER_AUTH] },
+  });
+  const res = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, true);
+  ok('场景22：叶与中间 CA 均含 serverAuth、锚无 EKU → 成立',
+    assertOk(res, 'serverAuth 链') === true, res.ok ? '' : res.message);
+  if (res.ok) {
+    const allHavePurposeNotes = res.chain.every((c) =>
+      c.notes.some((n) => n.startsWith('用途声明：'))
+      && c.notes.some((n) => n.startsWith('继承结果：')));
+    ok('场景22：逐级展示用途声明与继承结果', allHavePurposeNotes,
+      res.chain.map((c) => c.notes.join(' / ')).join(' || '));
+    const leafDecl = res.chain[0].notes.find((n) => n.startsWith('用途声明：'));
+    const anchorDecl = res.chain[2].notes.find((n) => n.startsWith('用途声明：'));
+    ok('场景22：叶显示 serverAuth、锚显示未声明不限制',
+      leafDecl.includes('serverAuth') && anchorDecl.includes('未声明 extendedKeyUsage'),
+      `${leafDecl} ｜ ${anchorDecl}`);
+  }
+}
+
+// ---------- 场景 23：叶证书用途不符（仅 clientAuth 或缺 EKU） ----------
+{
+  const w = buildWorld({ leaf: { eku: [CLIENT_AUTH] } });
+  const res = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, true);
+  ok('场景23a：叶证书仅含 clientAuth → 拒绝(eku) 并定位叶层',
+    assertFail(res, 'eku', '叶 clientAuth') === true && res.level === 0,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
+  // 同一证书包关闭开关后仍按原规则通过
+  const off = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, false);
+  ok('场景23b：关闭开关后同一 clientAuth 叶证书包仍通过',
+    assertOk(off, '开关关闭') === true, off.ok ? '' : off.message);
+
+  const w2 = buildWorld(); // 叶证书默认不带 extendedKeyUsage
+  const res2 = await run(w2.anchor, [w2.leaf, w2.inter], 'app.example.com', T, true);
+  ok('场景23c：叶证书缺少 extendedKeyUsage → 拒绝(eku) 并定位叶层',
+    assertFail(res2, 'eku', '叶无 EKU') === true && res2.level === 0,
+    res2.ok ? '意外成功' : `[${res2.stage}] L${res2.level} ${res2.message}`);
+}
+
+// ---------- 场景 24：中间 CA 的 extendedKeyUsage 排除 serverAuth ----------
+{
+  const w = buildWorld({
+    inter: { eku: [CLIENT_AUTH] },
+    leaf: { eku: [SERVER_AUTH] },
+  });
+  const res = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, true);
+  ok('场景24a：中间 CA 仅含 clientAuth 排除 serverAuth → 拒绝(eku) 并定位中间层',
+    assertFail(res, 'eku', '中间 CA 排除') === true && res.level === 1 && res.label === '证书#2',
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.label} ${res.message}`);
+  // 同一证书包关闭开关后仍按原规则通过
+  const off = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, false);
+  ok('场景24b：关闭开关后同一被排除证书包仍按原规则通过',
+    assertOk(off, '开关关闭') === true, off.ok ? '' : off.message);
+}
+
+// ---------- 场景 25：信任锚 EKU 排除 serverAuth ----------
+{
+  const w = buildWorld({
+    root: { eku: [CLIENT_AUTH] },
+    leaf: { eku: [SERVER_AUTH] },
+  });
+  const res = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, true);
+  ok('场景25：信任锚 EKU 排除 serverAuth → 拒绝(eku) 并定位锚层',
+    assertFail(res, 'eku', '锚排除') === true && res.level === 2,
+    res.ok ? '意外成功' : `[${res.stage}] L${res.level} ${res.message}`);
+}
+
+// ---------- 场景 26：无 EKU 的 CA 不额外限制，叶含 serverAuth 即通过 ----------
+{
+  const w = buildWorld({ leaf: { eku: [SERVER_AUTH] } }); // 中间 CA 与锚均无 EKU
+  const res = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, true);
+  ok('场景26：链上 CA 均无 extendedKeyUsage → 不额外限制，成立',
+    assertOk(res, 'CA 无 EKU') === true, res.ok ? '' : res.message);
+  const off = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, false);
+  ok('场景26：关闭开关时裁决不受影响', assertOk(off, '开关关闭') === true,
+    off.ok ? '' : off.message);
+}
+
+// ---------- 场景 27：开关开启时原有关键规则（SAN / 签名）仍优先生效 ----------
+{
+  // 叶证书既无 EKU 又主机名不符：应维持原 hostname 裁决，不被 eku 覆盖
+  const w = buildWorld({ leaf: { eku: [CLIENT_AUTH] } });
+  const res = await run(w.anchor, [w.leaf, w.inter], 'nosuch.example.com', T, true);
+  ok('场景27a：用途不符且主机名不符 → 仍按 hostname 拒绝',
+    assertFail(res, 'hostname', 'hostname 优先') === true,
+    res.ok ? '意外成功' : `[${res.stage}] ${res.message}`);
+  // 叶证书签名被篡改且 EKU 不符：应维持 signature 裁决
+  const w2 = buildWorld({ leaf: { eku: [CLIENT_AUTH], tamperSig: true } });
+  const res2 = await run(w2.anchor, [w2.leaf, w2.inter], 'app.example.com', T, true);
+  ok('场景27b：用途不符且签名篡改 → 仍按 signature 拒绝',
+    assertFail(res2, 'signature', 'signature 优先') === true && res2.level === 0,
+    res2.ok ? '意外成功' : `[${res2.stage}] L${res2.level} ${res2.message}`);
 }
 
 console.log(`\n${passed} 项通过，${failed} 项失败`);

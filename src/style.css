@@ -60,6 +60,24 @@ textarea { resize: vertical; word-break: break-all; }
   gap: 12px;
 }
 
+label.switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-weight: 500;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  margin-top: 14px;
+  cursor: pointer;
+}
+
+label.switch input {
+  width: auto;
+  flex: 0 0 auto;
+  margin-top: 3px;
+  cursor: pointer;
+}
+
 .actions { margin-top: 16px; display: flex; gap: 10px; }
 
 button {

@@ -19,9 +19,16 @@ export const OID = {
   basicConstraints: '2.5.29.19',
   keyUsage: '2.5.29.15',
   san: '2.5.29.17',
+  eku: '2.5.29.37',
   nameConstraints: '2.5.29.30',
   ski: '2.5.29.14',
   aki: '2.5.29.35',
+};
+
+// extendedKeyUsage 中与 TLS 相关的常见用途 OID。
+export const EKU_PURPOSE = {
+  serverAuth: '1.3.6.1.5.5.7.3.1',
+  clientAuth: '1.3.6.1.5.5.7.3.2',
 };
 
 // 已知但与本工具判定无关、允许忽略的扩展（即使标记 critical 也不影响链判定）。
@@ -108,6 +115,17 @@ function parseSan(bytes) {
   return { dns };
 }
 
+function parseEku(bytes) {
+  const el = readElement(bytes, 0);
+  expect(el, 0, 16, 'ExtKeyUsageSyntax SEQUENCE');
+  const oids = [];
+  for (const kp of children(el)) {
+    expect(kp, 0, 6, 'KeyPurposeId OID');
+    oids.push(oidString(kp.value));
+  }
+  return { oids };
+}
+
 function parseNameConstraints(bytes) {
   const el = readElement(bytes, 0);
   expect(el, 0, 16, 'NameConstraints SEQUENCE');
@@ -129,6 +147,7 @@ function parseExtensions(el) {
     basicConstraints: null, // {ca, pathLen, critical}
     keyUsage: null,         // {digitalSignature, keyCertSign, ..., critical}
     san: null,              // {dns: [], critical}
+    eku: null,              // {oids: [], critical}
     nameConstraints: null,  // {permitted: [], excluded: [], critical}
     unknownCritical: [],
   };
@@ -155,6 +174,9 @@ function parseExtensions(el) {
         break;
       case OID.san:
         ext.san = { ...parseSan(v), critical };
+        break;
+      case OID.eku:
+        ext.eku = { ...parseEku(v), critical };
         break;
       case OID.nameConstraints:
         ext.nameConstraints = { ...parseNameConstraints(v), critical };
@@ -247,7 +269,7 @@ export function parseCertificate(derBytes) {
 
     let extensions = {
       basicConstraints: null, keyUsage: null, san: null,
-      nameConstraints: null, unknownCritical: [],
+      eku: null, nameConstraints: null, unknownCritical: [],
     };
     if (i < t.length) {
       if (t[i].tagClass !== 2 || t[i].tag !== 3) throw new DerError('TBSCertificate 含未知字段');
@@ -287,6 +309,8 @@ export function parseCertificate(derBytes) {
       keyUsagePresent: extensions.keyUsage !== null,
       keyCertSign: extensions.keyUsage !== null && extensions.keyUsage.keyCertSign === true,
       sanDns: extensions.san ? extensions.san.dns : [],
+      ekuOids: extensions.eku ? extensions.eku.oids : null,
+      ekuCritical: extensions.eku ? extensions.eku.critical : false,
       nameConstraints: extensions.nameConstraints || { permitted: [], excluded: [] },
       label: '',
       sha256: '',

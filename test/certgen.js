@@ -109,6 +109,8 @@ export function makeCert(opts) {
     isCA = false,
     pathLen = null,
     keyUsage = null, // {digitalSignature, keyEncipherment, keyCertSign, crlSign}
+    eku = null,      // KeyPurposeId OID 字符串数组，如 ['1.3.6.1.5.5.7.3.1']
+    ekuCritical = false,
     sanDns = [],
     nameConstraints = null, // {permitted: [], excluded: []}
     notBefore = new Date('2026-01-01T00:00:00Z'),
@@ -127,6 +129,7 @@ export function makeCert(opts) {
     exts.push(extn('2.5.29.19', true, SEQ(...bc)));
   }
   if (keyUsage) exts.push(extn('2.5.29.15', true, keyUsageValue(keyUsage)));
+  if (eku) exts.push(extn('2.5.29.37', ekuCritical, SEQ(...eku.map((o) => OID(o)))));
   if (sanDns.length > 0) exts.push(extn('2.5.29.17', false, SEQ(...sanDns.map(DNSNAME))));
   if (nameConstraints) {
     const nc = [];
