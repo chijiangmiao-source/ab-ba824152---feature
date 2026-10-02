@@ -82,6 +82,14 @@ export function extn(oid, critical, valueDer) {
   return critical ? SEQ(OID(oid), BOOL(true), OCT(valueDer)) : SEQ(OID(oid), OCT(valueDer));
 }
 
+// 常见 extendedKeyUsage 用途 OID（测试用）。
+export const EKU = {
+  serverAuth: '1.3.6.1.5.5.7.3.1',
+  clientAuth: '1.3.6.1.5.5.7.3.2',
+  codeSigning: '1.3.6.1.5.5.7.3.3',
+  emailProtection: '1.3.6.1.5.5.7.3.4',
+};
+
 function keyUsageValue({ digitalSignature, keyEncipherment, keyCertSign, crlSign }) {
   let b0 = 0;
   if (digitalSignature) b0 |= 0x80;
@@ -109,6 +117,7 @@ export function makeCert(opts) {
     isCA = false,
     pathLen = null,
     keyUsage = null, // {digitalSignature, keyEncipherment, keyCertSign, crlSign}
+    extKeyUsage = null, // [oid, ...]；null 不写 extendedKeyUsage 扩展
     sanDns = [],
     nameConstraints = null, // {permitted: [], excluded: []}
     notBefore = new Date('2026-01-01T00:00:00Z'),
@@ -127,6 +136,9 @@ export function makeCert(opts) {
     exts.push(extn('2.5.29.19', true, SEQ(...bc)));
   }
   if (keyUsage) exts.push(extn('2.5.29.15', true, keyUsageValue(keyUsage)));
+  if (extKeyUsage && extKeyUsage.length > 0) {
+    exts.push(extn('2.5.29.37', false, SEQ(...extKeyUsage.map(OID))));
+  }
   if (sanDns.length > 0) exts.push(extn('2.5.29.17', false, SEQ(...sanDns.map(DNSNAME))));
   if (nameConstraints) {
     const nc = [];

@@ -2,9 +2,9 @@
 import { verifyChainSet } from './chain.js';
 
 self.onmessage = async (e) => {
-  const { id, anchorDer, certDers, dnsName, verifyTime } = e.data || {};
+  const { id, anchorDer, certDers, dnsName, verifyTime, requireServerAuth } = e.data || {};
   try {
-    const result = await verifyChainSet({ anchorDer, certDers, dnsName, verifyTime });
+    const result = await verifyChainSet({ anchorDer, certDers, dnsName, verifyTime, requireServerAuth });
     self.postMessage({ id, result });
   } catch (err) {
     self.postMessage({

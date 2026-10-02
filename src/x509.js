@@ -20,8 +20,19 @@ export const OID = {
   keyUsage: '2.5.29.15',
   san: '2.5.29.17',
   nameConstraints: '2.5.29.30',
+  extKeyUsage: '2.5.29.37',
   ski: '2.5.29.14',
   aki: '2.5.29.35',
+};
+
+// 常见 extendedKeyUsage 密钥用途 OID。
+export const KEY_PURPOSE = {
+  serverAuth: '1.3.6.1.5.5.7.3.1',
+  clientAuth: '1.3.6.1.5.5.7.3.2',
+  codeSigning: '1.3.6.1.5.5.7.3.3',
+  emailProtection: '1.3.6.1.5.5.7.3.4',
+  timeStamping: '1.3.6.1.5.5.7.3.8',
+  ocspSigning: '1.3.6.1.5.5.7.3.9',
 };
 
 // 已知但与本工具判定无关、允许忽略的扩展（即使标记 critical 也不影响链判定）。
@@ -108,8 +119,19 @@ function parseSan(bytes) {
   return { dns };
 }
 
-function parseNameConstraints(bytes) {
+function parseExtKeyUsage(bytes) {
   const el = readElement(bytes, 0);
+  expect(el, 0, 16, 'ExtKeyUsageSyntax SEQUENCE');
+  const oids = [];
+  for (const kp of children(el)) {
+    expect(kp, 0, 6, 'KeyPurposeId OID');
+    oids.push(oidString(kp.value));
+  }
+  if (oids.length === 0) throw new DerError('ExtKeyUsageSyntax 至少应含一个 KeyPurposeId');
+  return oids;
+}
+
+function parseNameConstraints(bytes) {  const el = readElement(bytes, 0);
   expect(el, 0, 16, 'NameConstraints SEQUENCE');
   const permitted = [];
   const excluded = [];
@@ -130,6 +152,7 @@ function parseExtensions(el) {
     keyUsage: null,         // {digitalSignature, keyCertSign, ..., critical}
     san: null,              // {dns: [], critical}
     nameConstraints: null,  // {permitted: [], excluded: [], critical}
+    extKeyUsage: null,      // [oid, ...]（缺失为 null，空序列为 []）
     unknownCritical: [],
   };
   for (const extnEl of children(el)) {
@@ -158,6 +181,9 @@ function parseExtensions(el) {
         break;
       case OID.nameConstraints:
         ext.nameConstraints = { ...parseNameConstraints(v), critical };
+        break;
+      case OID.extKeyUsage:
+        ext.extKeyUsage = parseExtKeyUsage(v);
         break;
       default:
         if (critical && !IGNORED_KNOWN.has(oid)) ext.unknownCritical.push(oid);
@@ -247,7 +273,7 @@ export function parseCertificate(derBytes) {
 
     let extensions = {
       basicConstraints: null, keyUsage: null, san: null,
-      nameConstraints: null, unknownCritical: [],
+      nameConstraints: null, extKeyUsage: null, unknownCritical: [],
     };
     if (i < t.length) {
       if (t[i].tagClass !== 2 || t[i].tag !== 3) throw new DerError('TBSCertificate 含未知字段');
@@ -287,6 +313,7 @@ export function parseCertificate(derBytes) {
       keyUsagePresent: extensions.keyUsage !== null,
       keyCertSign: extensions.keyUsage !== null && extensions.keyUsage.keyCertSign === true,
       sanDns: extensions.san ? extensions.san.dns : [],
+      extKeyUsage: extensions.extKeyUsage, // null=未出现；[]=出现但为空（异常编码）
       nameConstraints: extensions.nameConstraints || { permitted: [], excluded: [] },
       label: '',
       sha256: '',

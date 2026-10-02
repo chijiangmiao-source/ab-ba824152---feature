@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { verifyChainSet, hostMatch, dnsWithin } from '../src/chain.js';
 import { derEcdsaToRaw } from '../src/der.js';
-import { makeCert, makeKeys, extn, OCT, SEQ } from './certgen.js';
+import { makeCert, makeKeys, extn, OCT, SEQ, EKU } from './certgen.js';
 
 const T = Date.parse('2026-10-01T12:00:00Z'); // 验证时刻（有效期内）
 const NB = new Date('2026-01-01T00:00:00Z');
@@ -64,8 +64,8 @@ function buildWorld({ root = {}, inter = {}, leaf = {} } = {}) {
   return { anchor, inter: interDer, leaf: leafDer, rootK, interK, leafK };
 }
 
-const run = (anchor, certs, dns = 'app.example.com', at = T) =>
-  verifyChainSet({ anchorDer: anchor, certDers: certs, dnsName: dns, verifyTime: at });
+const run = (anchor, certs, dns = 'app.example.com', at = T, extra = {}) =>
+  verifyChainSet({ anchorDer: anchor, certDers: certs, dnsName: dns, verifyTime: at, ...extra });
 
 // ---------- 单元：DER ECDSA 签名转换 ----------
 {
@@ -359,6 +359,101 @@ const run = (anchor, certs, dns = 'app.example.com', at = T) =>
   const atNotAfter = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', NA.getTime());
   ok('场景21：验证时刻取 notAfter 端点 → 成立', assertOk(atNotAfter, '边界') === true,
     atNotAfter.ok ? '' : atNotAfter.message);
+}
+
+// ---------- 场景 22：要求服务器用途 —— 有效 serverAuth 链 ----------
+{
+  const w = buildWorld({ leaf: { extKeyUsage: [EKU.serverAuth] } });
+  const res = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, { requireServerAuth: true });
+  ok('场景22a：叶证书声明 serverAuth、上级无 EKU → 成立', assertOk(res, 'serverAuth 链') === true,
+    res.ok ? '' : res.message);
+  if (res.ok) {
+    const joined = res.chain.map((c) => c.notes.join('|')).join('\n');
+    ok('场景22b：逐级依据展示用途声明与继承结果',
+      res.chain.length === 3
+      && joined.includes('extendedKeyUsage 声明：serverAuth')
+      && joined.includes('继承结果：与上级用途交集仍含 serverAuth')
+      && res.chain[1].notes.some((n) => n.includes('未声明 extendedKeyUsage（不额外限制用途）'))
+      && res.chain[2].notes.some((n) => n.includes('serverAuth 未被排除')),
+      joined);
+  }
+}
+
+// ---------- 场景 23：要求服务器用途 —— 叶证书用途不符 ----------
+{
+  const wClient = buildWorld({ leaf: { extKeyUsage: [EKU.clientAuth] } });
+  const resClient = await run(wClient.anchor, [wClient.leaf, wClient.inter], 'app.example.com', T,
+    { requireServerAuth: true });
+  ok('场景23a：叶证书 EKU 仅含 clientAuth → 拒绝(eku) L0',
+    assertFail(resClient, 'eku', '仅 clientAuth') === true && resClient.level === 0,
+    resClient.ok ? '意外成功' : `[${resClient.stage}] L${resClient.level} ${resClient.message}`);
+
+  const wNone = buildWorld(); // 叶证书无任何 EKU
+  const resNone = await run(wNone.anchor, [wNone.leaf, wNone.inter], 'app.example.com', T,
+    { requireServerAuth: true });
+  ok('场景23b：叶证书缺少 EKU → 拒绝(eku) L0',
+    assertFail(resNone, 'eku', '缺少 EKU') === true && resNone.level === 0,
+    resNone.ok ? '意外成功' : `[${resNone.stage}] L${resNone.level} ${resNone.message}`);
+
+  const wOther = buildWorld({ leaf: { extKeyUsage: [EKU.codeSigning, EKU.emailProtection] } });
+  const resOther = await run(wOther.anchor, [wOther.leaf, wOther.inter], 'app.example.com', T,
+    { requireServerAuth: true });
+  ok('场景23c：叶证书 EKU 不含 serverAuth → 拒绝(eku) L0',
+    assertFail(resOther, 'eku', '其他用途') === true && resOther.level === 0,
+    resOther.ok ? '意外成功' : `[${resOther.stage}] L${resOther.level} ${resOther.message}`);
+}
+
+// ---------- 场景 24：要求服务器用途 —— 上级 CA 排除 serverAuth ----------
+{
+  const wInter = buildWorld({
+    leaf: { extKeyUsage: [EKU.serverAuth, EKU.clientAuth] },
+    inter: { extKeyUsage: [EKU.clientAuth] },
+  });
+  const resInter = await run(wInter.anchor, [wInter.leaf, wInter.inter], 'app.example.com', T,
+    { requireServerAuth: true });
+  ok('场景24a：中间 CA EKU 排除 serverAuth → 拒绝(eku) 并定位 L1',
+    assertFail(resInter, 'eku', '中间 CA 排除') === true && resInter.level === 1,
+    resInter.ok ? '意外成功' : `[${resInter.stage}] L${resInter.level} ${resInter.message}`);
+
+  const wAnchor = buildWorld({
+    leaf: { extKeyUsage: [EKU.serverAuth] },
+    inter: { extKeyUsage: [EKU.serverAuth] },
+    root: { extKeyUsage: [EKU.clientAuth] },
+  });
+  const resAnchor = await run(wAnchor.anchor, [wAnchor.leaf, wAnchor.inter], 'app.example.com', T,
+    { requireServerAuth: true });
+  ok('场景24b：信任锚 EKU 排除 serverAuth → 拒绝(eku) 并定位 L2',
+    assertFail(resAnchor, 'eku', '锚排除') === true && resAnchor.level === 2,
+    resAnchor.ok ? '意外成功' : `[${resAnchor.stage}] L${resAnchor.level} ${resAnchor.message}`);
+
+  // 交集继承：叶同时声明两用途，中间 CA 仅留 serverAuth → 仍成立
+  const wPass = buildWorld({
+    leaf: { extKeyUsage: [EKU.serverAuth, EKU.clientAuth] },
+    inter: { extKeyUsage: [EKU.serverAuth] },
+  });
+  const resPass = await run(wPass.anchor, [wPass.leaf, wPass.inter], 'app.example.com', T,
+    { requireServerAuth: true });
+  ok('场景24c：交集仍含 serverAuth → 成立',
+    assertOk(resPass, '交集继承') === true, resPass.ok ? '' : resPass.message);
+}
+
+// ---------- 场景 25：关闭开关后同一旧证书包仍按原规则通过 ----------
+{
+  const w = buildWorld(); // 默认世界：叶证书无 EKU
+  const off = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, { requireServerAuth: false });
+  ok('场景25a：关闭开关（显式 false）→ 旧证书包成立', assertOk(off, '开关关闭') === true,
+    off.ok ? '' : off.message);
+  const def = await run(w.anchor, [w.leaf, w.inter]); // 不传开关
+  ok('场景25b：缺省不传开关 → 裁决语义不变（成立）', assertOk(def, '缺省语义') === true,
+    def.ok ? '' : def.message);
+  const on = await run(w.anchor, [w.leaf, w.inter], 'app.example.com', T, { requireServerAuth: true });
+  ok('场景25c：同一旧证书包开启开关 → 拒绝(eku)',
+    assertFail(on, 'eku', '开启后拒绝') === true,
+    on.ok ? '意外成功' : `[${on.stage}] ${on.message}`);
+  if (def.ok) {
+    ok('场景25d：关闭时逐级依据不含用途条目',
+      def.chain.every((c) => c.notes.every((n) => !n.includes('extendedKeyUsage'))));
+  }
 }
 
 console.log(`\n${passed} 项通过，${failed} 项失败`);

@@ -34,6 +34,16 @@
         </div>
       </div>
 
+      <label class="switch" for="requireServerAuth">
+        <input id="requireServerAuth" type="checkbox">
+        <span>要求服务器用途（extendedKeyUsage 含 serverAuth）</span>
+      </label>
+      <p class="hint switch-hint">
+        开启后从叶证书到信任锚逐级核验：叶证书必须显式声明 serverAuth，
+        链上任何证书声明的 extendedKeyUsage 均不得排除该用途；未声明该扩展的证书不额外限制。
+        关闭时保持既有裁决语义。
+      </p>
+
       <div class="actions">
         <button id="submit" type="button">提交复核</button>
         <button id="clear" type="button" class="secondary">清空草稿</button>

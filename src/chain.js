@@ -1,9 +1,10 @@
 // chain.js — 候选链构造与逐级核验。
 // 流程：解析 → 摘要去重 → 叶证书候选 → DFS 构造叶→锚候选链 →
 //       按 SHA-256 摘要序稳定排序 → 逐级核验（有效期 / CA 与 keyUsage /
-//       pathLenConstraint / 累积 DNS 名称约束 / 签名）→ 多链取摘要序最小者。
+//       pathLenConstraint / 累积 DNS 名称约束 / 可选 extendedKeyUsage serverAuth /
+//       签名）→ 多链取摘要序最小者。
 
-import { parseCertificate } from './x509.js';
+import { parseCertificate, KEY_PURPOSE } from './x509.js';
 import { derEcdsaToRaw, toHex } from './der.js';
 
 export const STAGE_LABELS = {
@@ -19,9 +20,27 @@ export const STAGE_LABELS = {
   keyusage: 'keyUsage',
   pathlen: 'pathLenConstraint',
   nameconstraint: '名称约束',
+  eku: '扩展密钥用途',
   signature: '签名核验',
   internal: '内部错误',
 };
+
+const PURPOSE_NAMES = {
+  [KEY_PURPOSE.serverAuth]: 'serverAuth',
+  [KEY_PURPOSE.clientAuth]: 'clientAuth',
+  [KEY_PURPOSE.codeSigning]: 'codeSigning',
+  [KEY_PURPOSE.emailProtection]: 'emailProtection',
+  [KEY_PURPOSE.timeStamping]: 'timeStamping',
+  [KEY_PURPOSE.ocspSigning]: 'ocspSigning',
+};
+
+function purposeName(oid) {
+  return PURPOSE_NAMES[oid] || oid;
+}
+
+function purposeList(oids) {
+  return oids.map(purposeName).join(', ');
+}
 
 const MAX_POOL = 7;
 
@@ -85,7 +104,10 @@ async function verifySignature(issuerCert, cert) {
 }
 
 // 核验单条候选链（chain[0]=叶，chain[n-1]=锚）。成功返回逐级依据，失败返回首个失败环节。
-async function verifyOneChain(chain, host, at) {
+// requireServerAuth=true 时按 RFC 5280 语义逐级核验 extendedKeyUsage：
+// 叶证书必须显式声明 serverAuth；链上任一 CA 若声明了 EKU，则其用途集不得排除 serverAuth；
+// 未声明 EKU 的证书不额外限制（原样继承上级用途集）。
+async function verifyOneChain(chain, host, at, requireServerAuth) {
   const n = chain.length;
   const notes = chain.map(() => []);
 
@@ -97,9 +119,29 @@ async function verifyOneChain(chain, host, at) {
     if (i > 0) acc = mergeConstraints(acc, chain[i].nameConstraints);
   }
 
+  // 自顶向下累积 EKU 用途集：inherit[i] = 第 i 级以上所有 CA 声明 EKU 的交集；
+  // null 表示上方未做任何用途限制（RFC 5280：缺省 EKU 不限制用途）。
+  let ekuAcc = null;
+  const inherit = new Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    inherit[i] = ekuAcc;
+    if (i > 0 && chain[i].extKeyUsage !== null) {
+      ekuAcc = ekuAcc === null
+        ? [...chain[i].extKeyUsage]
+        : ekuAcc.filter((o) => chain[i].extKeyUsage.includes(o));
+    }
+  }
+
   const failAt = (stage, level, message) => ({
     ok: false, stage, level, label: chain[level].label, message, progress: level,
   });
+
+  // 本级声明与上级累积取交：任一为 null（未声明）即不额外收窄。
+  const combineEku = (own, aboveSet) => {
+    if (own === null) return aboveSet;
+    if (aboveSet === null) return [...own];
+    return aboveSet.filter((o) => own.includes(o));
+  };
 
   for (let i = 0; i < n; i++) {
     const c = chain[i];
@@ -153,6 +195,35 @@ async function verifyOneChain(chain, host, at) {
       }
     }
 
+    if (requireServerAuth) {
+      // 逐级用途核验：叶证书必须显式声明 serverAuth；任何声明了 EKU 的证书
+      // （含中间 CA 与信任锚）都不得排除该用途；未声明 EKU 不额外限制。
+      const own = c.extKeyUsage;
+      const declared = own === null ? '未声明 extendedKeyUsage（不额外限制用途）'
+        : `extendedKeyUsage 声明：${purposeList(own)}`;
+      if (i === 0) {
+        if (own === null) {
+          return failAt('eku', i, '叶证书缺少 extendedKeyUsage 扩展，无法证明允许 serverAuth（TLS 服务器认证）用途');
+        }
+        if (!own.includes(KEY_PURPOSE.serverAuth)) {
+          const onlyClient = own.length === 1 && own[0] === KEY_PURPOSE.clientAuth;
+          return failAt('eku', i, onlyClient
+            ? '叶证书 extendedKeyUsage 仅含 clientAuth，不能用于 TLS 服务器认证'
+            : `叶证书 extendedKeyUsage（${purposeList(own)}）不含 serverAuth，不能用于 TLS 服务器认证`);
+        }
+      } else if (own !== null && !own.includes(KEY_PURPOSE.serverAuth)) {
+        return failAt('eku', i,
+          `${isAnchor ? '信任锚' : '中间 CA'} extendedKeyUsage（${purposeList(own)}）不含 serverAuth，排除了 TLS 服务器认证用途`);
+      }
+      const combined = combineEku(own, inherit[i]);
+      const inheritText = combined === null
+        ? '继承结果：链上未出现用途限制，serverAuth 未被排除'
+        : combined.includes(KEY_PURPOSE.serverAuth)
+          ? `继承结果：与上级用途交集仍含 serverAuth（${purposeList(combined)}）`
+          : `继承结果：与上级用途交集已排除 serverAuth（${purposeList(combined)}）`;
+      notes[i].push(`${declared}；${inheritText}`);
+    }
+
     if (!isAnchor) {
       const issuer = chain[i + 1];
       if (!(await verifySignature(issuer, c))) {
@@ -183,7 +254,8 @@ async function verifyOneChain(chain, host, at) {
 }
 
 // 主入口：anchorDer / certDers 为 Uint8Array，dnsName 为字符串，verifyTime 为毫秒时间戳。
-export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime }) {
+// requireServerAuth 为 true 时附加 extendedKeyUsage 逐级核验；缺省/为 false 时保持既有裁决语义。
+export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime, requireServerAuth = false }) {
   if (!anchorDer || anchorDer.length === 0) return fail('input', null, null, '缺少信任锚证书');
   if (!Array.isArray(certDers) || certDers.length === 0) {
     return fail('input', null, null, '至少需要 1 张候选证书（叶证书）');
@@ -302,7 +374,7 @@ export async function verifyChainSet({ anchorDer, certDers, dnsName, verifyTime 
   // —— 逐级核验；多链成立时取摘要序最小者
   const failures = [];
   for (const cand of candidates) {
-    const res = await verifyOneChain(cand, host, at);
+    const res = await verifyOneChain(cand, host, at, requireServerAuth);
     if (res.ok) return res;
     failures.push(res);
   }
